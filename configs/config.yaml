@@ -1,0 +1,23 @@
+watch_dir: "D:/video-drop" // Directory to watch for new video files
+uploaded_dir: "D:/video-uploaded" // Directory to move successfully uploaded files
+failed_dir: "D:/video-failed" // Directory to move files that failed to upload
+
+allowed_extensions:
+  - ".mp4"
+  - ".mov"
+
+stabilize_seconds: 20
+scan_interval_seconds: 15
+max_retry: 3
+
+r2:
+  account_id: "your-account-id"
+  access_key_id: "your-access-key"
+  secret_access_key: "your-secret-key"
+  bucket: "video-bucket"
+  endpoint: "https://<accountid>.r2.cloudflarestorage.com"
+
+backend:
+  base_url: "https://api.yourdomain.com"
+  api_key: "your-api-key"
+  timeout_seconds: 10
