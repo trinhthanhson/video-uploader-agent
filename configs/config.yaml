@@ -11,11 +11,11 @@ scan_interval_seconds: 15
 max_retry: 3
 
 r2:
-  account_id: "your-account-id"
-  access_key_id: "your-access-key"
-  secret_access_key: "your-secret-key"
-  bucket: "video-bucket"
-  endpoint: "https://<accountid>.r2.cloudflarestorage.com"
+  account_id: "129bf8f58d5cb6e81f007db69eb6880a"
+  access_key_id: "2fe3084797b365d5addd42f0c7f12667"
+  secret_access_key: "23d68339acd57f08c1dffa5c94ae185ce99550a53c8817c18b0f7005cf5f1828"
+  bucket: "video-experience"
+  endpoint: "https://129bf8f58d5cb6e81f007db69eb6880a.r2.cloudflarestorage.com"
 
 backend:
   base_url: "https://api.yourdomain.com"
