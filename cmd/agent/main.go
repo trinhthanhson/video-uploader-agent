@@ -2,7 +2,6 @@ package main
 
 import (
 	"encoding/json"
-	"fmt"
 	"os"
 	"path/filepath"
 	"time"
@@ -19,7 +18,10 @@ import (
 	"video-uploader-agent/internal/watcher"
 )
 
-const metricsFile = "upload-metrics.jsonl"
+const (
+	metricsFile = "upload-metrics.jsonl"
+	serviceName = "VideoUploaderAgent"
+)
 
 type UploadMetric struct {
 	OrderID            string    `json:"order_id"`
@@ -36,13 +38,7 @@ type UploadMetric struct {
 }
 
 type program struct {
-	appLogger *loggerWrapper
-	stopCh    chan struct{}
-}
-
-type loggerWrapper struct {
-	Println func(v ...any)
-	Fatal   func(v ...any)
+	stopCh chan struct{}
 }
 
 func (p *program) Start(s service.Service) error {
@@ -51,13 +47,17 @@ func (p *program) Start(s service.Service) error {
 }
 
 func (p *program) Stop(s service.Service) error {
-	close(p.stopCh)
+	select {
+	case <-p.stopCh:
+	default:
+		close(p.stopCh)
+	}
 	return nil
 }
 
 func main() {
-	cfg := &service.Config{
-		Name:        "VideoUploaderAgent",
+	svcConfig := &service.Config{
+		Name:        serviceName,
 		DisplayName: "Video Uploader Agent",
 		Description: "Background service to watch folders and upload videos to R2.",
 	}
@@ -66,26 +66,45 @@ func main() {
 		stopCh: make(chan struct{}),
 	}
 
-	s, err := service.New(prg, cfg)
+	s, err := service.New(prg, svcConfig)
 	if err != nil {
 		panic(err)
 	}
 
+	// Support manual commands if needed:
+	// agent.exe install
+	// agent.exe start
+	// agent.exe stop
+	// agent.exe uninstall
 	if len(os.Args) > 1 {
 		cmd := os.Args[1]
-		if cmd == "install" || cmd == "uninstall" || cmd == "start" || cmd == "stop" || cmd == "restart" {
+		switch cmd {
+		case "install", "start", "stop", "restart", "uninstall":
 			if err := service.Control(s, cmd); err != nil {
-				fmt.Println("service command error:", err)
-				os.Exit(1)
+				panic(err)
 			}
-			fmt.Println("service command success:", cmd)
 			return
 		}
 	}
 
+	// Nếu đang chạy trong service context thì chạy service luôn.
+	if service.Interactive() {
+		// Người dùng double click / chạy trực tiếp.
+		// Tự cài và tự start service, không cần PowerShell.
+		autoInstallAndStart(s)
+		return
+	}
+
+	// Chạy trong Windows Service context.
 	if err := s.Run(); err != nil {
 		panic(err)
 	}
+}
+
+func autoInstallAndStart(s service.Service) {
+	// thử install trước; nếu đã tồn tại thì bỏ qua
+	_ = service.Control(s, "install")
+	_ = service.Control(s, "start")
 }
 
 func (p *program) run() {
@@ -98,38 +117,32 @@ func (p *program) run() {
 
 	logDir := cfg.LogDir
 	if logDir == "" {
-		exeDir := exeDir()
-		logDir = filepath.Join(exeDir, "logs")
+		logDir = filepath.Join(exeDir(), "logs")
 	}
 
-	l, logFile, err := logger.New(logDir)
+	appLogger, logFile, err := logger.New(logDir)
 	if err != nil {
 		panic(err)
 	}
 	defer logFile.Close()
 
-	p.appLogger = &loggerWrapper{
-		Println: l.Println,
-		Fatal:   l.Fatal,
-	}
-
-	l.Println("agent starting...")
-	l.Println("using config:", cfgPath)
-	l.Println("watch dir:", cfg.WatchDir)
+	appLogger.Println("agent starting...")
+	appLogger.Println("using config:", cfgPath)
+	appLogger.Println("watch dir:", cfg.WatchDir)
 
 	u := uploader.NewR2Uploader(cfg)
 	bc := backend.NewClient(cfg)
 
 	w, err := watcher.New()
 	if err != nil {
-		l.Println("watcher init error:", err)
+		appLogger.Println("watcher init error:", err)
 	} else {
 		defer w.Close()
 
 		if err := w.AddRecursive(cfg.WatchDir); err != nil {
-			l.Println("watch add recursive error:", err)
+			appLogger.Println("watch add recursive error:", err)
 		} else {
-			l.Println("watcher attached to:", cfg.WatchDir)
+			appLogger.Println("watcher attached to:", cfg.WatchDir)
 		}
 
 		go func() {
@@ -139,13 +152,13 @@ func (p *program) run() {
 					if !ok {
 						return
 					}
-					l.Println("watch event:", event.Op.String(), event.Name)
+					appLogger.Println("watch event:", event.Op.String(), event.Name)
 
 				case err, ok := <-w.Errors():
 					if !ok {
 						return
 					}
-					l.Println("watch error:", err)
+					appLogger.Println("watch error:", err)
 
 				case <-p.stopCh:
 					return
@@ -158,12 +171,12 @@ func (p *program) run() {
 	defer ticker.Stop()
 
 	for {
-		processOnce(cfg, u, bc, l)
+		processOnce(cfg, u, bc, appLogger)
 
 		select {
 		case <-ticker.C:
 		case <-p.stopCh:
-			l.Println("agent stopping...")
+			appLogger.Println("agent stopping...")
 			return
 		}
 	}
@@ -173,22 +186,22 @@ func processOnce(
 	cfg *config.Config,
 	u *uploader.R2Uploader,
 	bc *backend.Client,
-	l interface{ Println(v ...any) },
+	appLogger interface{ Println(v ...any) },
 ) {
 	jobs, err := scanner.Scan(cfg.WatchDir, cfg.AllowedExtensions)
 	if err != nil {
-		l.Println("scan error:", err)
+		appLogger.Println("scan error:", err)
 		return
 	}
 
 	if len(jobs) > 0 {
-		l.Println("scan found files:", len(jobs))
+		appLogger.Println("scan found files:", len(jobs))
 	}
 
 	for _, job := range jobs {
 		detectedAt := time.Now()
 
-		l.Println("found file:", job.FilePath)
+		appLogger.Println("found file:", job.FilePath)
 
 		err := stabilizer.WaitUntilStable(
 			job.FilePath,
@@ -196,30 +209,30 @@ func processOnce(
 			time.Duration(cfg.StabilizeSeconds)*time.Second,
 		)
 		if err != nil {
-			l.Println("stabilize error:", err)
+			appLogger.Println("stabilize error:", err)
 			continue
 		}
 
 		info, statErr := os.Stat(job.FilePath)
 		if statErr != nil {
-			l.Println("stat file error:", statErr)
+			appLogger.Println("stat file error:", statErr)
 			continue
 		}
 
 		fileSizeBytes := info.Size()
 
-		l.Println("uploading:", job.FilePath)
+		appLogger.Println("uploading:", job.FilePath)
 		uploadStartedAt := time.Now()
 
 		objectKey, err := u.Upload(job.FilePath, job.OrderID)
 		uploadCompletedAt := time.Now()
 
 		if err != nil {
-			l.Println("upload failed:", err)
+			appLogger.Println("upload failed:", err)
 
 			_, moveErr := fileops.MoveToDir(job.FilePath, cfg.FailedDir, job.OrderID)
 			if moveErr != nil {
-				l.Println("move failed error:", moveErr)
+				appLogger.Println("move failed error:", moveErr)
 			}
 
 			notifyErr := bc.NotifyUploadFailed(backend.UploadFailedRequest{
@@ -229,7 +242,7 @@ func processOnce(
 				ErrorMessage: err.Error(),
 			})
 			if notifyErr != nil {
-				l.Println("notify failed status error:", notifyErr)
+				appLogger.Println("notify failed status error:", notifyErr)
 			}
 
 			metric := UploadMetric{
@@ -246,21 +259,21 @@ func processOnce(
 				ErrorMessage:       err.Error(),
 			}
 			if writeErr := appendMetric(resolveMetricsPath(), metric); writeErr != nil {
-				l.Println("write metric failed:", writeErr)
+				appLogger.Println("write metric failed:", writeErr)
 			}
 
 			continue
 		}
 
-		l.Println("upload success:", objectKey)
+		appLogger.Println("upload success:", objectKey)
 
 		movedPath, err := fileops.MoveToDir(job.FilePath, cfg.UploadedDir, job.OrderID)
 		if err != nil {
-			l.Println("move uploaded error:", err)
+			appLogger.Println("move uploaded error:", err)
 			continue
 		}
 
-		l.Println("moved to:", movedPath)
+		appLogger.Println("moved to:", movedPath)
 
 		notifyErr := bc.NotifyUploadSuccess(backend.UploadSuccessRequest{
 			OrderID:   job.OrderID,
@@ -270,7 +283,7 @@ func processOnce(
 			Status:    "uploaded",
 		})
 		if notifyErr != nil {
-			l.Println("notify upload success error:", notifyErr)
+			appLogger.Println("notify upload success error:", notifyErr)
 		}
 
 		metric := UploadMetric{
@@ -286,10 +299,10 @@ func processOnce(
 			Status:             "uploaded",
 		}
 		if writeErr := appendMetric(resolveMetricsPath(), metric); writeErr != nil {
-			l.Println("write metric failed:", writeErr)
+			appLogger.Println("write metric failed:", writeErr)
 		}
 
-		l.Println("metric written for:", filepath.Base(movedPath))
+		appLogger.Println("metric written for:", filepath.Base(movedPath))
 	}
 }
 
@@ -298,6 +311,7 @@ func calculateSpeedMBps(fileSizeBytes int64, startedAt, completedAt time.Time) f
 	if durationSec <= 0 {
 		return 0
 	}
+
 	fileSizeMB := float64(fileSizeBytes) / 1024.0 / 1024.0
 	return fileSizeMB / durationSec
 }
@@ -314,8 +328,11 @@ func appendMetric(path string, metric UploadMetric) error {
 		return err
 	}
 
-	_, err = f.Write(append(encoded, '\n'))
-	return err
+	if _, err := f.Write(append(encoded, '\n')); err != nil {
+		return err
+	}
+
+	return nil
 }
 
 func resolveConfigPath() string {
